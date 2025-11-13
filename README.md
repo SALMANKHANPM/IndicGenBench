@@ -36,7 +36,7 @@ IndicGenBench is a comprehensive benchmark suite for evaluating LLMs across a va
 
 ```bash
 # Clone the repository
-git clone https://github.com/SukrutAI/IndicGenBench.git
+git clone https://github.com/SlaabAI/IndicGenBench.git
 cd IndicGenBench
 
 # Create a virtual environment

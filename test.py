@@ -3,7 +3,13 @@ from runner import vLLMInterface
 model = vLLMInterface(
     "google/gemma-3-4b-it",
     dtype="bfloat16",
-    min_kv_cache_blocks=128,
+    max_gpu_memory_utilization=0.8,
 )
-result = model.generate("Hello, world!")
-print(result)
+
+while True:
+    prompt = input("Enter a prompt: ")
+    if prompt == "exit":
+        break
+    result = model.generate(prompt)
+    print(result)
+    print("-" * 100)

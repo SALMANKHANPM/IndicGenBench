@@ -1,25 +1,16 @@
 {
   "models": [
     {
-      "name": "unsloth/Llama-3.2-1B",
-      "type": "huggingface",
-      "device": "cuda",
-      "max_tokens": 2048,
-      "max_gpu_memory_utilization": 0.9
-    },
-    {
       "name": "google/gemma-3-4b-it",
       "type": "hf-vllm",
-      "max_tokens": 1024,
-      "max_gpu_memory_utilization": 0.85,
-      "quantization": "bitsandbytes",
-      "dtype": "float16",
-      "logprobs": 0,
-      "min_kv_cache_blocks": 128
+      "max_tokens": 16384,
+      "max_gpu_memory_utilization": 0.95,
+      "dtype": "bfloat16",
+      "logprobs": 5,
+      "batch_size": 8
     }
   ],
   "languages": ["te"],
   "tasks": ["crosssum_in", "flores_in", "xquad_in", "xorqa_in"],
-  "splits": ["test"],
-  "sample_size": 10
+  "splits": ["test"]
 }

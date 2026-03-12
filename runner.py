@@ -7,6 +7,7 @@ It handles data loading, generation, evaluation, and reporting.
 """
 
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -80,6 +81,18 @@ class LLMInterface:
         """Generate text based on the prompt"""
         raise NotImplementedError("Subclasses must implement this method")
 
+    def generate_batch(self, prompts: List[str]) -> List[str]:
+        """Default batch generation fallback for interfaces without native batching."""
+        return [self.generate(prompt) for prompt in prompts]
+
+    async def generate_async(self, prompt: str, max_tokens: int = 512) -> str:
+        """Async wrapper for single generation."""
+        return await asyncio.to_thread(self.generate, prompt, max_tokens)
+
+    async def generate_batch_async(self, prompts: List[str]) -> List[str]:
+        """Async wrapper for batch generation."""
+        return await asyncio.to_thread(self.generate_batch, prompts)
+
     @property
     def name(self) -> str:
         return self.model_name
@@ -92,39 +105,52 @@ class vLLMInterface(LLMInterface):
         self,
         model_name: str,
         max_tokens: int = 1024,
-        max_gpu_memory_utilization: float = 0.1,
+        max_gpu_memory_utilization: float = 0.8,
         logprobs: int = 0,
         dtype: str = "auto",
-        min_kv_cache_blocks: int = 0,
+        batch_size: int = 8,
     ):
         super().__init__(model_name)
+        self.batch_size = max(1, batch_size)
         try:
             from vllm import LLM, SamplingParams
 
             self.llm_kwargs = dict(
                 model=model_name,
-                enforce_eager=True,
+                enforce_eager=False,
                 gpu_memory_utilization=max_gpu_memory_utilization,
                 dtype=dtype,
+                max_model_len=max_tokens,
             )
-            # Setting num_gpu_blocks_override to a small fixed number stops
-            # vLLM from reserving the bulk of free VRAM for the KV cache.
-            # The minimum viable value is 1 block (~1–4 MB), but a small
-            # cushion (e.g. 128) avoids OOM during prefill of longer prompts.
-            if min_kv_cache_blocks > 0:
-                self.llm_kwargs["num_gpu_blocks_override"] = min_kv_cache_blocks
 
             self.llm = LLM(**self.llm_kwargs)
-            self.logprobs = logprobs
-            self.params = SamplingParams(max_tokens=max_tokens, logprobs=logprobs)
+            self.params = SamplingParams(logprobs=logprobs, max_tokens=max_tokens)
         except ImportError:
             raise ImportError(
                 "vLLM is not installed. Please install it with `pip install vllm`"
             )
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, max_tokens: int = 512) -> str:
         response = self.llm.generate(prompt, self.params)
-        return response[0].outputs[0].text
+        if response and response[0].outputs:
+            return response[0].outputs[0].text
+        return ""
+
+    def generate_batch(self, prompts: List[str]) -> List[str]:
+        responses = self.llm.generate(prompts, self.params)
+        outputs = []
+        for response in responses:
+            if response.outputs:
+                outputs.append(response.outputs[0].text)
+            else:
+                outputs.append("")
+        return outputs
+
+    async def generate_async(self, prompt: str, max_tokens: int = 512) -> str:
+        return await asyncio.to_thread(self.generate, prompt, max_tokens)
+
+    async def generate_batch_async(self, prompts: List[str]) -> List[str]:
+        return await asyncio.to_thread(self.generate_batch, prompts)
 
 
 class HuggingFaceLLM(LLMInterface):
@@ -266,7 +292,7 @@ def create_llm_interface(model_config: Dict[str, Any]) -> LLMInterface:
                 "max_gpu_memory_utilization", 0.8
             ),
             logprobs=model_config.get("logprobs", 5),
-            min_kv_cache_blocks=model_config.get("min_kv_cache_blocks", 0),
+            batch_size=model_config.get("batch_size", 8),
             dtype=model_config.get("dtype", "bfloat16"),
         )
 
@@ -433,6 +459,7 @@ class IndicGenBenchEvaluator:
 
         predictions = []
         references = []
+        prepared_inputs = []
 
         for example in tqdm(data, desc=f"{model.name} / {task} / {language} / {split}"):
             prompt = get_prompt_for_task(task, example, language_name)
@@ -450,13 +477,41 @@ class IndicGenBenchEvaluator:
                 logger.warning(f"Missing reference in {task}-{language}-{split}")
                 continue
 
-            # Generate prediction
-            try:
-                prediction = model.generate(prompt)
-                predictions.append(prediction)
-                references.append(reference)
-            except Exception as e:
-                logger.error(f"Error generating prediction: {e}")
+            prepared_inputs.append((prompt, reference))
+
+        if hasattr(model, "batch_size") and getattr(model, "batch_size", 1) > 1:
+            batch_size = max(1, int(getattr(model, "batch_size", 1)))
+            desc = f"{model.name} / {task} / {language} / {split} [batched]"
+            for i in tqdm(range(0, len(prepared_inputs), batch_size), desc=desc):
+                batch = prepared_inputs[i : i + batch_size]
+                prompts = [prompt for prompt, _ in batch]
+                batch_refs = [reference for _, reference in batch]
+                try:
+                    batch_predictions = model.generate_batch(prompts)
+                    if len(batch_predictions) != len(prompts):
+                        raise ValueError(
+                            f"Batch size mismatch: expected {len(prompts)}, got {len(batch_predictions)}"
+                        )
+                    predictions.extend(batch_predictions)
+                    references.extend(batch_refs)
+                except Exception as e:
+                    logger.error(f"Error in batch generation: {e}")
+                    # Fallback to per-example generation for this failed batch.
+                    for prompt, reference in batch:
+                        try:
+                            prediction = model.generate(prompt)
+                            predictions.append(prediction)
+                            references.append(reference)
+                        except Exception as single_err:
+                            logger.error(f"Error generating prediction: {single_err}")
+        else:
+            for prompt, reference in prepared_inputs:
+                try:
+                    prediction = model.generate(prompt)
+                    predictions.append(prediction)
+                    references.append(reference)
+                except Exception as e:
+                    logger.error(f"Error generating prediction: {e}")
 
         # Calculate metrics
         if not predictions:
